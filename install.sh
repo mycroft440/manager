@@ -1,205 +1,169 @@
 #!/bin/bash
-
-# ==============================================================================
-# Script de Instalação Remota do Multiflow (v2.1)
 #
-# Otimizado para automação, robustez e execução com um único comando.
-# - Removemos a compilação de binários Go para o OpenVPN.
-# - O script agora depende do openvpn.sh para o gerenciamento.
-# ==============================================================================
+# Script de Instalação do Gerenciador MultiFlow
+#
+# Este script automatiza a instalação do Gerenciador MultiFlow,
+# incluindo a verificação do sistema, instalação de dependências,
+# configuração do ambiente e criação de um comando de atalho.
+#
 
-# --- Configuração do Script ---
-set -e
-set -o pipefail
+# --- Definição de Cores para o Terminal ---
+# Usado para formatar as saídas do script e melhorar a visualização.
+cor_vermelha='\033[0;31m'
+cor_verde='\033[0;32m'
+cor_amarela='\033[0;33m'
+cor_azul='\033[0;34m'
+cor_reset='\033[0m' # Reseta a cor para o padrão do terminal
 
-# --- Configuração de Cores e Funções de Log ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# --- Funções Auxiliares ---
 
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+# Função para exibir mensagens formatadas com cores.
+# Argumentos:
+#   $1: Código da cor a ser usada.
+#   $2: Texto da mensagem a ser exibida.
+mensagem() {
+    local cor="$1"
+    local texto="$2"
+    echo -e "${cor}${texto}${cor_reset}"
 }
 
-log_warn() {
-    echo -e "${YELLOW}[AVISO]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERRO]${NC} $1" >&2
-}
-
-error_exit() {
-    log_error "$1"
-    # Limpa o diretório temporário em caso de erro
-    if [ -d "$TMP_DIR" ]; then
-        log_info "A limpar ficheiros temporários..."
-        rm -rf "$TMP_DIR"
+# Função para verificar se o script está sendo executado com privilégios de root.
+verificar_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        mensagem "${cor_vermelha}" "Erro: Este script precisa ser executado como root."
+        mensagem "${cor_amarela}" "Tente novamente usando 'sudo bash install.sh'"
+        exit 1
     fi
-    exit 1
 }
 
-# --- Função para Aguardar o APT ---
-wait_for_apt() {
-    log_info "A verificar se o gestor de pacotes (APT) está disponível..."
-    local max_attempts=30
-    local attempt=0
-    
-    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
-          fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
-          fuser /var/cache/apt/archives/lock >/dev/null 2>&1 || \
-          fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
-        
-        attempt=$((attempt + 1))
-        if [ $attempt -ge $max_attempts ]; then
-            error_exit "Timeout: O APT continuou ocupado por outro processo. Tente novamente mais tarde."
-        fi
-        
-        log_warn "APT está em uso. A aguardar... (tentativa $attempt/$max_attempts)"
-        sleep 5
-    done
-    
-    log_info "APT está disponível para uso."
-}
-
-# --- Início da Execução ---
-
-# 1. Verificação de Privilégios e Variáveis
-if [ "$(id -u)" -ne 0 ]; then
-    SUDO="sudo"
-    log_warn "O script não está a ser executado como root. A usar 'sudo' quando necessário."
-else
-    SUDO=""
-fi
-
-REPO_URL="https://github.com/mycroft440/multiflow.git"
-INSTALL_DIR="/opt/multiflow"
-TMP_DIR="/tmp/multiflow-install-$$"
-
-# 2. Verificação do Sistema Operacional
-if [ ! -f /etc/os-release ]; then
-    error_exit "Não foi possível identificar o sistema operacional."
-fi
-source /etc/os-release
-if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
-    log_warn "Este script é otimizado para Debian/Ubuntu. Alguns pacotes podem variar."
-    if [ -t 0 ]; then
-        read -p "Deseja continuar mesmo assim? (s/n): " -n 1 -r; echo
-        if [[ ! $REPLY =~ ^[Ss]$ ]]; then
-            log_info "Instalação cancelada."
-            exit 0
+# Função para verificar se o sistema operacional é compatível (Debian ou Ubuntu).
+verificar_sistema() {
+    mensagem "${cor_azul}" "Verificando o sistema operacional..."
+    if [ -f /etc/os-release ]; then
+        # Carrega as variáveis do arquivo para identificar o SO
+        . /etc/os-release
+        if [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
+            mensagem "${cor_verde}" "Sistema operacional compatível ($NAME) detectado."
+        else
+            mensagem "${cor_vermelha}" "Erro: Este script é compatível apenas com sistemas Debian ou Ubuntu."
+            exit 1
         fi
     else
-        log_warn "A executar em modo não interativo. A continuar automaticamente."
+        mensagem "${cor_vermelha}" "Erro: Não foi possível determinar o sistema operacional."
+        exit 1
     fi
-fi
+}
 
-# 3. Atualização e Instalação de Dependências
-log_info "A iniciar atualização e limpeza do sistema..."
-wait_for_apt
-$SUDO apt-get update -y
-$SUDO apt-get upgrade -y --with-new-pkgs
-$SUDO apt-get --fix-broken install -y
-$SUDO dpkg --configure -a
-
-log_info "A instalar dependências essenciais..."
-# REMOVIDO: golang-go foi removido das dependências
-$SUDO apt-get install -y python3 python3-pip git build-essential automake autoconf libtool gcc python3-psutil python3-requests
-$SUDO apt-get autoremove -y
-$SUDO apt-get clean
-
-# 4. Clonar o Repositório
-log_info "A baixar o projeto Multiflow de $REPO_URL..."
-git clone --depth 1 "$REPO_URL" "$TMP_DIR"
-cd "$TMP_DIR"
-
-# 5. Instalação do Multiflow
-log_info "A iniciar a instalação do Multiflow..."
-if [ -d "$INSTALL_DIR" ]; then
-    log_warn "Instalação anterior detetada em $INSTALL_DIR. A remover..."
-    $SUDO rm -rf "$INSTALL_DIR"
-fi
-$SUDO mkdir -p "$INSTALL_DIR"
-$SUDO cp -a . "$INSTALL_DIR/"
-
-# 6. Compilação dos Binários
-# REMOVIDO: Bloco de compilação do OpenVPN em Go foi removido.
-
-# Compila o wrapper BadVPN em C
-log_info "A compilar o wrapper BadVPN (C)..."
-# O executável será criado em $INSTALL_DIR/conexoes/badvpn_wrapper
-gcc "$INSTALL_DIR/conexoes/badvpn.c" -o "$INSTALL_DIR/conexoes/badvpn_wrapper"
-log_info "Wrapper BadVPN compilado com sucesso."
-
-cd "$INSTALL_DIR"
-
-# 7. Configuração de Permissões e Shebangs
-log_info "A configurar permissões de execução para os scripts..."
-find "$INSTALL_DIR" -type f -name "*.py" -print0 | while IFS= read -r -d $'\0' script; do
-    # Garante que o shebang está correto
-    if ! grep -q "^#\!/usr/bin/env python3" "$script"; then
-        $SUDO sed -i '1i#!/usr/bin/env python3' "$script"
+# Função para instalar as dependências necessárias para o script.
+instalar_dependencias() {
+    mensagem "${cor_azul}" "Atualizando a lista de pacotes do sistema..."
+    if ! apt-get update -y; then
+        mensagem "${cor_vermelha}" "Falha ao atualizar a lista de pacotes. Verifique sua conexão e repositórios."
+        exit 1
     fi
-    $SUDO chmod +x "$script"
-done
-find "$INSTALL_DIR" -type f -name "*.sh" -exec $SUDO chmod +x {} +
 
-# 8. Instalação de Ferramentas de Otimização (ZRAM e SWAP)
-log_info "A instalar e configurar ferramentas de otimização..."
+    mensagem "${cor_azul}" "Instalando dependências necessárias..."
+    # Lista de pacotes que o script principal e suas ferramentas precisam.
+    local dependencias=("python3" "python3-pip" "screen" "unzip" "wget" "git" "curl")
+    
+    for dep in "${dependencias[@]}"; do
+        # Utiliza dpkg-query para uma verificação mais robusta se o pacote está instalado.
+        if ! dpkg-query -W -f='${Status}' "$dep" 2>/dev/null | grep -q "ok installed"; then
+            mensagem "${cor_amarela}" "Instalando ${dep}..."
+            if ! apt-get install -y "$dep"; then
+                mensagem "${cor_vermelha}" "Falha ao instalar o pacote '${dep}'. A instalação será abortada."
+                exit 1
+            fi
+        else
+            mensagem "${cor_verde}" "Dependência '${dep}' já está instalada."
+        fi
+    done
+}
 
-# Instalação do ZRAM
-ZRAM_SCRIPT="$INSTALL_DIR/ferramentas/zram.py"
-if [ -f "$ZRAM_SCRIPT" ]; then
-    log_info "A instalar o gestor ZRAM..."
-    # O próprio script gere a sua cópia e instalação do serviço systemd
-    $SUDO python3 "$ZRAM_SCRIPT" install "$ZRAM_SCRIPT" || log_warn "Não foi possível instalar o serviço ZRAM."
-    $SUDO python3 "$ZRAM_SCRIPT" setup || log_warn "Não foi possível ativar o ZRAM."
-else
-    log_warn "Script do ZRAM não encontrado."
-fi
-
-# Instalação do SWAP
-SWAP_SCRIPT="$INSTALL_DIR/ferramentas/swap.py"
-if [ -f "$SWAP_SCRIPT" ]; then
-    log_info "A configurar ficheiro de SWAP..."
-    $SUDO python3 "$SWAP_SCRIPT" setup || log_warn "Não foi possível configurar o SWAP."
-else
-    log_warn "Script de SWAP não encontrado."
-fi
-
-# 9. Criação de Links Simbólicos
-log_info "A criar links simbólicos para facilitar a execução..."
-$SUDO ln -sf "$INSTALL_DIR/multiflow.py" /usr/local/bin/multiflow
-$SUDO ln -sf "$INSTALL_DIR/multiflow.py" /usr/local/bin/h
-$SUDO ln -sf "$INSTALL_DIR/multiflow.py" /usr/local/bin/menu
-
-# 10. Limpeza
-log_info "A limpar ficheiros de instalação temporários..."
-rm -rf "$TMP_DIR"
-
-# --- Finalização ---
-echo
-log_info "${GREEN}=====================================================${NC}"
-log_info "${GREEN}  Instalação do Multiflow concluída com sucesso!   ${NC}"
-log_info "${GREEN}=====================================================${NC}"
-echo
-log_info "Pode iniciar a aplicação executando um dos seguintes comandos:"
-echo -e "  ${BLUE}multiflow${NC}"
-echo -e "  ${BLUE}h${NC}"
-echo -e "  ${BLUE}menu${NC}"
-echo
-log_info "A instalação do OpenVPN e do BadVPN pode ser feita através dos menus da aplicação."
-echo
-
-# Pergunta se o utilizador deseja iniciar a aplicação
-if [ -t 0 ]; then
-    read -p "Deseja iniciar o Multiflow agora? (s/n): " -n 1 -r; echo
-    if [[ $REPLY =~ ^[Ss]$ ]]; then
-        log_info "A iniciar Multiflow..."
-        /usr/local/bin/multiflow
+# Função para configurar o ambiente, criando diretórios e copiando arquivos.
+configurar_ambiente() {
+    local diretorio_manager="/etc/manager"
+    
+    mensagem "${cor_azul}" "Configurando o ambiente em '${diretorio_manager}'..."
+    
+    if ! mkdir -p "${diretorio_manager}"; then
+        mensagem "${cor_vermelha}" "Falha ao criar o diretório base: ${diretorio_manager}."
+        exit 1
     fi
-else
-    log_info "Instalação concluída. Para iniciar, execute 'multiflow'."
-fi
+
+    # Copia todos os arquivos do diretório atual (incluindo ocultos) para o destino.
+    # O uso de 'cp -a' preserva as permissões dos arquivos.
+    mensagem "${cor_azul}" "Copiando arquivos do projeto..."
+    if ! cp -a ./. "${diretorio_manager}/"; then
+        mensagem "${cor_vermelha}" "Falha ao copiar os arquivos para ${diretorio_manager}."
+        exit 1
+    fi
+
+    # Lista de scripts que precisam de permissão de execução.
+    local scripts_executaveis=(
+        "${diretorio_manager}/install.sh"
+        "${diretorio_manager}/multiflow.py"
+        "${diretorio_manager}/multiflow_wrapper.sh"
+        "${diretorio_manager}/conexoes/badvpn_wrapper"
+        "${diretorio_manager}/conexoes/openvpn.sh"
+        "${diretorio_manager}/conexoes/multiflowproxy/instalar_deps_multiflowpx.py"
+    )
+
+    mensagem "${cor_azul}" "Concedendo permissões de execução..."
+    for script in "${scripts_executaveis[@]}"; do
+        if [ -f "$script" ]; then
+            if ! chmod +x "$script"; then
+                 mensagem "${cor_vermelha}" "Falha ao conceder permissão de execução para '$script'."
+                 # Não abortamos a instalação, mas avisamos o usuário.
+            fi
+        else
+            mensagem "${cor_amarela}" "Aviso: O arquivo de script '$script' não foi encontrado para dar permissão."
+        fi
+    done
+}
+
+# Função para criar um atalho global para o script principal.
+criar_comando() {
+    local caminho_comando="/usr/local/bin/manager"
+    mensagem "${cor_azul}" "Criando o comando de atalho 'manager'..."
+
+    # Usa 'tee' para criar o script wrapper que executa o programa principal.
+    # Isso permite que o usuário chame 'manager' de qualquer lugar no sistema.
+    if ! tee "${caminho_comando}" > /dev/null <<EOF
+#!/bin/bash
+# Wrapper para executar o script principal do Gerenciador MultiFlow.
+# Muda para o diretório do script e o executa com os argumentos passados.
+cd /etc/manager && python3 multiflow.py "\$@"
+EOF
+    then
+        mensagem "${cor_vermelha}" "Falha ao criar o arquivo de comando em ${caminho_comando}."
+        exit 1
+    fi
+
+    if ! chmod +x "${caminho_comando}"; then
+        mensagem "${cor_vermelha}" "Falha ao dar permissão de execução para o comando ${caminho_comando}."
+        exit 1
+    fi
+}
+
+# --- Função Principal de Execução ---
+main() {
+    clear # Limpa a tela para uma apresentação mais limpa
+    mensagem "${cor_verde}" "--- Iniciando Instalação do Gerenciador MultiFlow ---"
+    
+    verificar_root
+    verificar_sistema
+    instalar_dependencias
+    configurar_ambiente
+    criar_comando
+    
+    echo # Linha em branco para espaçamento
+    mensagem "${cor_verde}" "====================================================="
+    mensagem "${cor_verde}" "  Instalação concluída com sucesso!                  "
+    mensagem "${cor_verde}" "====================================================="
+    mensagem "${cor_amarela}" "Para iniciar, basta executar o comando: manager"
+    echo # Linha em branco para espaçamento
+}
+
+# Ponto de entrada do script: executa a função principal.
+main
